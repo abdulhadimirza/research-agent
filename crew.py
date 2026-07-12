@@ -3,7 +3,6 @@ from dotenv import load_dotenv
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import tool
 from ddgs import DDGS
-import litellm
 
 # Workaround for CrewAI injecting cache_breakpoint on unsupported models
 try:
