@@ -1,0 +1,6 @@
+[submodule "crewAI"]
+	path = crewAI
+	url = https://github.com/crewAIInc/crewAI.git
+[submodule "chainlit"]
+	path = chainlit
+	url = https://github.com/Chainlit/chainlit.git
