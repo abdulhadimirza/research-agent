@@ -49,18 +49,68 @@ class ResearchFlow(Flow[ResearchState]):
 
     @start()
     def gather_urls(self):
+        import json
         search_query = self.extract_search_query()
         self.log_status(f"Searching the web for: '{search_query}'")
         results = []
         try:
             with DDGS() as ddgs:
                 try:
-                    results = ddgs.text(search_query, max_results=3, backend="auto")
+                    # 1. Increase Search Yield
+                    results = list(ddgs.text(search_query, max_results=20, backend="auto"))
                 except Exception as e:
                     self.log_status(f"DDGS search with auto backend failed: {e}")
                 
-                self.state.urls = [r.get('href') or r.get('url') for r in results if r.get('href') or r.get('url')]
-                self.log_status(f"Found {len(self.state.urls)} URLs to scrape.")
+                if not results:
+                    self.state.urls = []
+                    self.log_status("No URLs found from search.")
+                    return
+
+                # 2. Data Formatting
+                formatted_results = []
+                for i, r in enumerate(results):
+                    url = r.get('href') or r.get('url')
+                    title = r.get('title', 'No Title')
+                    snippet = r.get('body', 'No Snippet')
+                    formatted_results.append(f"Index: {i}\nTitle: {title}\nURL: {url}\nSnippet: {snippet}")
+                
+                results_str = "\n\n".join(formatted_results)
+                self.log_status(f"Fetched {len(results)} results, curating top 5 with LLM...")
+
+                # 3. LLM Curation (8B Model)
+                groq_llm = get_groq_llm(model="groq/llama-3.1-8b-instant")
+                prompt = (
+                    f"You are an expert researcher evaluating search results for a user's query.\n"
+                    f"User's Original Query: {self.state.query}\n\n"
+                    f"Here are the top search results:\n\n{results_str}\n\n"
+                    f"Select exactly the 5 most relevant and trustworthy results to answer the user's query."
+                )
+
+                class URLCuration(BaseModel):
+                    selected_indices: list[int]
+
+                try:
+                    res = groq_llm.call(prompt, response_model=URLCuration)
+                    # 4. State Update
+                    import json
+                    data = json.loads(res)
+                    indices = data.get("selected_indices", [])
+                    
+                    selected_urls = []
+                    for idx in indices:
+                        if isinstance(idx, int) and 0 <= idx < len(results):
+                            r = results[idx]
+                            url = r.get('href') or r.get('url')
+                            if url:
+                                selected_urls.append(url)
+                    
+                    self.state.urls = selected_urls[:5]
+                except Exception as e:
+                    self.log_status(f"LLM curation failed: {e}. Falling back to top 5.")
+                    self.state.urls = [r.get('href') or r.get('url') for r in results if r.get('href') or r.get('url')][:5]
+
+                self.log_status(f"Curated {len(self.state.urls)} URLs to scrape.")
+                print(f"\n=== CURATED URLS ===\n" + "\n".join(str(url) for url in self.state.urls if url) + "\n====================\n")
         except Exception as e:
             self.state.urls = []
             self.log_status(f"Search error: {e}")
@@ -98,7 +148,7 @@ class ResearchFlow(Flow[ResearchState]):
     def synthesize_report(self):
         self.log_status("Synthesizing final report...")
         groq_llm = get_groq_llm(
-            model="groq/llama-3.3-70b-versatile",
+            model="groq/llama-3.3-70b-versatile", # Comment this out while experimenting to save tokens
             additional_params={
                 "parallel_tool_calls": False,
                 "num_retries": 5
