@@ -33,7 +33,7 @@ class ResearchFlow(Flow[ResearchState]):
 
     def extract_search_query(self) -> str:
         self.log_status("Formulating search query...")
-        groq_llm = get_groq_llm()
+        groq_llm = get_groq_llm(model="groq/llama-3.1-8b-instant")
         prompt = (
             f"You are a search query optimizer. Extract the core search keywords from this user request. "
             f"Output ONLY the optimized search query string (maximum 10 words), with no quotes or preamble.\n\n"
@@ -98,6 +98,7 @@ class ResearchFlow(Flow[ResearchState]):
     def synthesize_report(self):
         self.log_status("Synthesizing final report...")
         groq_llm = get_groq_llm(
+            model="groq/llama-3.3-70b-versatile",
             additional_params={
                 "parallel_tool_calls": False,
                 "num_retries": 5
