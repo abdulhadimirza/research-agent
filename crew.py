@@ -19,8 +19,9 @@ except ImportError:
 load_dotenv()
 
 # Initialize the embedder once so we don't load the model on every function call
-from sentence_transformers import SentenceTransformer, util
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
+import numpy as np
+from fastembed import TextEmbedding
+embedder = TextEmbedding(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 def clean_markdown(text: str) -> str:
     """Strip navigation bars, footer link definitions, and tag/post lists from scraped markdown."""
@@ -91,15 +92,17 @@ def extract_relevant_content(text: str, query: str, max_chars: int = 1500) -> st
         return ""
         
     # Compute embeddings
-    query_embedding = embedder.encode(query, convert_to_tensor=True)
-    paragraph_embeddings = embedder.encode(valid_paragraphs, convert_to_tensor=True)
+    query_embedding = next(embedder.embed([query]))
+    paragraph_embeddings = np.array(list(embedder.embed(valid_paragraphs)))
     
     # Compute cosine similarities
-    cosine_scores = util.cos_sim(query_embedding, paragraph_embeddings)[0]
+    query_norm = np.linalg.norm(query_embedding)
+    paragraph_norms = np.linalg.norm(paragraph_embeddings, axis=1)
+    cosine_scores = np.dot(paragraph_embeddings, query_embedding) / (query_norm * paragraph_norms + 1e-10)
     
     scored_paragraphs = []
-    for idx, score_tensor in enumerate(cosine_scores):
-        score = score_tensor.item()
+    for idx, score_val in enumerate(cosine_scores):
+        score = float(score_val)
         p = valid_paragraphs[idx]
         original_idx = valid_indices[idx]
         
@@ -122,25 +125,24 @@ def extract_relevant_content(text: str, query: str, max_chars: int = 1500) -> st
         if current_length + len(p) <= max_chars:
             selected_paragraphs.append((neg_i, p))
             current_length += len(p) + 2 # +2 for \n\n
-        elif current_length < max_chars / 2: 
-            remaining = max_chars - current_length
-            if '|' in p: # Try to truncate tables nicely by line
-                lines = p.split('\n')
-                table_lines = []
-                table_len = 0
-                for line in lines:
-                    if table_len + len(line) + 1 <= remaining:
-                        table_lines.append(line)
-                        table_len += len(line) + 1
-                    else:
-                        break
-                if table_lines:
-                    selected_paragraphs.append((neg_i, '\n'.join(table_lines)))
-                    current_length += table_len + 2
-            else:
-                selected_paragraphs.append((neg_i, p[:remaining] + "..."))
-            break
         else:
+            remaining = max_chars - current_length
+            if remaining > 3:
+                if '|' in p: # Try to truncate tables nicely by line
+                    lines = p.split('\n')
+                    table_lines = []
+                    table_len = 0
+                    for line in lines:
+                        if table_len + len(line) + 1 <= remaining:
+                            table_lines.append(line)
+                            table_len += len(line) + 1
+                        else:
+                            break
+                    if len(table_lines) >= 2:
+                        selected_paragraphs.append((neg_i, '\n'.join(table_lines)))
+                        current_length += table_len + 2
+                else:
+                    selected_paragraphs.append((neg_i, p[:remaining - 3] + "..."))
             break
             
     # Sort back to original order
@@ -166,7 +168,7 @@ class ResearchFlow(Flow[ResearchState]):
     def extract_search_query(self) -> str:
         self.log_status("Formulating search query...")
         groq_llm = LLM(
-            model=os.environ.get("MODEL", "groq/llama3-8b-8192"),
+            model=os.environ.get("MODEL", "groq/llama-3.1-8b-instant"),
             api_key=os.environ.get("GROQ_API_KEY")
         )
         prompt = (
@@ -190,12 +192,9 @@ class ResearchFlow(Flow[ResearchState]):
         try:
             with DDGS() as ddgs:
                 try:
-                    results = ddgs.text(search_query, max_results=3, backend="brave")
-                except Exception as e:
-                    self.log_status("Brave search backend failed (Rate Limited/429). Falling back to default backend...")
-                
-                if not results:
                     results = ddgs.text(search_query, max_results=3, backend="auto")
+                except Exception as e:
+                    self.log_status(f"DDGS search with auto backend failed: {e}")
                 
                 self.state.urls = [r.get('href') or r.get('url') for r in results if r.get('href') or r.get('url')]
                 self.log_status(f"Found {len(self.state.urls)} URLs to scrape.")
@@ -232,7 +231,7 @@ class ResearchFlow(Flow[ResearchState]):
     def synthesize_report(self):
         self.log_status("Synthesizing final report...")
         groq_llm = LLM(
-            model=os.environ.get("MODEL", "llama-3.1-8b-instant"),
+            model=os.environ.get("MODEL", "groq/llama-3.1-8b-instant"),
             api_key=os.environ.get("GROQ_API_KEY"),
             additional_params={
                 "parallel_tool_calls": False,
